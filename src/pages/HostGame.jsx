@@ -2,7 +2,6 @@ import React, { useEffect, useState, useRef } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { supabase, setCurrentQuestion, endGame, getPlayers, getGameForHost } from '../lib/supabase'
 import Podium from '../components/Podium'
-import ConnectionGuard from '../components/ConnectionGuard'
 
 const OPTION_LABELS = ['A', 'B', 'C', 'D']
 const OPTION_COLORS = ['#7c6cfc', '#34d399', '#fbbf24', '#f87171']
@@ -153,7 +152,6 @@ export default function HostGame() {
 
   return (
     <div className="grain" style={{ minHeight: '100vh', padding: '1.5rem 1rem', position: 'relative', overflow: 'hidden' }}>
-      <ConnectionGuard gameId={gameId} />
       <div className="glow-orb" style={{ width: 500, height: 500, background: 'rgba(124,108,252,0.08)', top: -200, right: -100 }} />
       <div style={{ maxWidth: 860, margin: '0 auto', position: 'relative', zIndex: 1 }}>
 

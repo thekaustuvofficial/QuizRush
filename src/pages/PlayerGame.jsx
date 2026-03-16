@@ -5,58 +5,48 @@ import {
   rejoinGame, getMyAnswer
 } from '../lib/supabase'
 import Confetti from '../components/Confetti'
-import ConnectionGuard from '../components/ConnectionGuard'
 
 const OPTION_LABELS = ['A', 'B', 'C', 'D']
 const OPTION_COLORS = ['#7c6cfc', '#34d399', '#fbbf24', '#f87171']
 const OPTION_BG    = ['rgba(124,108,252,0.15)', 'rgba(52,211,153,0.15)', 'rgba(251,191,36,0.15)', 'rgba(248,113,113,0.15)']
 
-// ─── Session persistence ──────────────────────────────────────────────────────
 const SESSION_KEY  = (id) => `qr_player_${id}`
 const saveSession  = (id, d) => { try { localStorage.setItem(SESSION_KEY(id), JSON.stringify(d)) } catch {} }
-const loadSession  = (id) => { try { const s = localStorage.getItem(SESSION_KEY(id)); return s ? JSON.parse(s) : null } catch { return null } }
-const clearSession = (id) => { try { localStorage.removeItem(SESSION_KEY(id)) } catch {} }
+const loadSession  = (id)    => { try { const s = localStorage.getItem(SESSION_KEY(id)); return s ? JSON.parse(s) : null } catch { return null } }
+const clearSession = (id)    => { try { localStorage.removeItem(SESSION_KEY(id)) } catch {} }
 
 export default function PlayerGame() {
   const { gameId } = useParams()
   const nav = useNavigate()
 
-  const [game, setGame]         = useState(null)
-  const [player, setPlayer]     = useState(null)
-  const [phase, setPhase]       = useState('connecting')
-  // phase values:
-  //   connecting → lobby → question → locked → waiting → finished
-  //   'locked'   = answer submitted, waiting for host to advance (NO answer revealed)
-  //   'waiting'  = time ran out without answering
+  const [game, setGame]             = useState(null)
+  const [player, setPlayer]         = useState(null)
+  const [phase, setPhase]           = useState('connecting')
+  // phases: connecting | lobby | question | locked | waiting | finished
 
-  const [currentQ, setCurrentQ]           = useState(null)  // { text, options[] } — NO .correct
+  const [currentQ, setCurrentQ]           = useState(null)
   const [qIndex, setQIndex]               = useState(-1)
   const [timeLeft, setTimeLeft]           = useState(0)
-  const [selectedOption, setSelectedOption] = useState(null) // which button they tapped
-  const [submitError, setSubmitError]     = useState(false)
+  const [selectedOption, setSelectedOption] = useState(null)
   const [scoreResult, setScoreResult]     = useState(null)
-  // scoreResult = { is_correct, points_earned, new_score, new_streak } — arrives from server
-
+  const [submitError, setSubmitError]     = useState(false)
   const [totalScore, setTotalScore]       = useState(0)
   const [streak, setStreak]               = useState(0)
   const [scoreFloat, setScoreFloat]       = useState(false)
-
   const [showConfetti, setShowConfetti]   = useState(false)
   const [finalRank, setFinalRank]         = useState(null)
   const [topPlayers, setTopPlayers]       = useState([])
 
-  // Stable refs
-  const playerRef    = useRef(null)
-  const scoreRef     = useRef(0)
-  const streakRef    = useRef(0)
-  const answeredRef  = useRef(false)
+  const playerRef   = useRef(null)
+  const scoreRef    = useRef(0)
+  const streakRef   = useRef(0)
+  const answeredRef = useRef(false)
   const startedAtRef = useRef(null)
-  const timerRef     = useRef(null)
-  const channelRef   = useRef(null)
-  const gameRef      = useRef(null)
-  const qIndexRef    = useRef(-1)   // stable ref version of qIndex for closures
+  const timerRef    = useRef(null)
+  const channelRef  = useRef(null)
+  const gameRef     = useRef(null)
+  const qIndexRef   = useRef(-1)
 
-  // ─── Init ────────────────────────────────────────────────────────────────
   useEffect(() => {
     initPlayer()
     return () => {
@@ -67,12 +57,9 @@ export default function PlayerGame() {
 
   async function initPlayer() {
     let p = null
-
-    // 1. Same-tab session
     const session = sessionStorage.getItem(`player_${gameId}`)
     if (session) { try { p = JSON.parse(session) } catch {} }
 
-    // 2. Cross-tab / refresh rejoin
     if (!p) {
       const stored = loadSession(gameId)
       if (stored?.id) {
@@ -94,7 +81,6 @@ export default function PlayerGame() {
     sessionStorage.setItem(`player_${gameId}`, JSON.stringify(p))
     saveSession(gameId, p)
 
-    // 3. Load game state — uses stripped view, NO correct answers
     const g = await getGameForPlayer(gameId)
     if (!g) { nav('/'); return }
     gameRef.current = g
@@ -108,48 +94,29 @@ export default function PlayerGame() {
     }
 
     if (g.status === 'playing' && g.current_question_index >= 0) {
-      await resumeMidQuestion(g, p)
+      const prev = await getMyAnswer(gameId, p.id, g.current_question_index)
+      if (prev) {
+        answeredRef.current = true
+        qIndexRef.current   = g.current_question_index
+        setQIndex(g.current_question_index)
+        setCurrentQ(g.questions[g.current_question_index])
+        setSelectedOption(parseInt(prev.answer))
+        setScoreResult({ is_correct: prev.is_correct, points_earned: prev.points_earned })
+        setPhase('locked')
+      } else {
+        handleNewQuestion(g, g.current_question_index, g.question_started_at)
+      }
     } else {
       setPhase('lobby')
     }
 
-    subscribeToGame()
-  }
-
-  async function resumeMidQuestion(g, p) {
-    const prev = await getMyAnswer(gameId, p.id, g.current_question_index)
-    if (prev) {
-      // Already answered this question — show locked state with their previous choice
-      answeredRef.current = true
-      qIndexRef.current   = g.current_question_index
-      setQIndex(g.current_question_index)
-      setCurrentQ(g.questions[g.current_question_index])
-      setSelectedOption(parseInt(prev.answer))
-      // Server already scored it — restore result for display
-      setScoreResult({
-        is_correct:    prev.is_correct,
-        points_earned: prev.points_earned,
-        new_score:     scoreRef.current,
-        new_streak:    streakRef.current,
-      })
-      setPhase('locked')
-    } else {
-      handleNewQuestion(g, g.current_question_index, g.question_started_at)
-    }
-  }
-
-  function subscribeToGame() {
-    // Single shared channel — all players on same channel name = 1 server subscription
+    // Single shared channel — all players same name = 1 server subscription
     const channel = supabase
       .channel(`game_state:${gameId}`)
       .on('postgres_changes', {
         event: 'UPDATE', schema: 'public',
         table: 'games', filter: `id=eq.${gameId}`,
       }, async (payload) => {
-        // IMPORTANT: Realtime sends the full games row including correct answers.
-        // We strip it before storing in state — questions are replaced with
-        // the stripped version from gameRef (loaded via player_game_view).
-        // The raw payload.new is used only to read metadata (status, index, started_at).
         const raw = payload.new
 
         if (raw.status === 'finished') {
@@ -163,46 +130,32 @@ export default function PlayerGame() {
         if (raw.status === 'playing') {
           const newIdx = raw.current_question_index
           if (newIdx >= 0 && newIdx !== qIndexRef.current) {
-            // New question — re-fetch stripped question data
-            // We have questions in gameRef (already stripped), so we can use them directly
-            const strippedQ = gameRef.current?.questions?.[newIdx]
-
-            if (strippedQ) {
-              // Check if somehow already answered (extreme edge case: ultra-fast resubmit)
+            const q = gameRef.current?.questions?.[newIdx]
+            if (q) {
               const prev = await getMyAnswer(gameId, playerRef.current.id, newIdx)
               if (prev) {
                 answeredRef.current = true
                 qIndexRef.current   = newIdx
                 setQIndex(newIdx)
-                setCurrentQ(strippedQ)
+                setCurrentQ(q)
                 setSelectedOption(parseInt(prev.answer))
-                setScoreResult({
-                  is_correct: prev.is_correct,
-                  points_earned: prev.points_earned,
-                  new_score: scoreRef.current,
-                  new_streak: streakRef.current,
-                })
+                setScoreResult({ is_correct: prev.is_correct, points_earned: prev.points_earned })
                 setPhase('locked')
               } else {
-                // Build a game-like object for handleNewQuestion using raw timing data
                 handleNewQuestion(
-                  { ...gameRef.current, current_question_index: newIdx, question_started_at: raw.question_started_at, time_per_question: raw.time_per_question },
+                  { ...gameRef.current, time_per_question: raw.time_per_question, question_started_at: raw.question_started_at },
                   newIdx,
                   raw.question_started_at
                 )
               }
             } else {
-              // questions not in cache yet — do a fresh fetch of stripped view
               const freshG = await getGameForPlayer(gameId)
-              if (freshG) {
-                gameRef.current = freshG
-                setGame(freshG)
-                handleNewQuestion(
-                  { ...freshG, question_started_at: raw.question_started_at },
-                  newIdx,
-                  raw.question_started_at
-                )
-              }
+              if (freshG) { gameRef.current = freshG; setGame(freshG) }
+              handleNewQuestion(
+                { ...gameRef.current, time_per_question: raw.time_per_question, question_started_at: raw.question_started_at },
+                newIdx,
+                raw.question_started_at
+              )
             }
           }
         }
@@ -218,13 +171,14 @@ export default function PlayerGame() {
     startedAtRef.current = new Date(startedAt).getTime()
     qIndexRef.current = idx
 
-    setCurrentQ(g.questions[idx])  // stripped — no .correct field
+    setCurrentQ(g.questions[idx])
     setQIndex(idx)
     setSelectedOption(null)
     setScoreResult(null)
     setSubmitError(false)
     setPhase('question')
 
+    // Timer runs fully client-side — no dependency on host after question starts
     const elapsed   = Date.now() - startedAtRef.current
     const remaining = Math.max(0, g.time_per_question - Math.floor(elapsed / 1000))
     setTimeLeft(remaining)
@@ -233,8 +187,7 @@ export default function PlayerGame() {
       setTimeLeft(t => {
         if (t <= 1) {
           clearInterval(timerRef.current)
-          // If they haven't answered — move to 'waiting' (time's up, no answer)
-          setPhase(prev => prev === 'question' ? 'waiting' : prev)
+          setPhase(p => p === 'question' ? 'waiting' : p)
           return 0
         }
         return t - 1
@@ -247,42 +200,29 @@ export default function PlayerGame() {
     answeredRef.current = true
     clearInterval(timerRef.current)
 
-    // Lock the UI immediately — show which button they pressed, no correct/wrong yet
     setSelectedOption(optionIndex)
     setPhase('locked')
     setSubmitError(false)
 
-    // Send to server — server decides if it's right, calculates points
     try {
-      const result = await withRetry(() => submitAnswerSecure({
-        gameId,
-        playerId: playerRef.current.id,
-        questionIndex: qIndexRef.current,
-        answer: optionIndex,   // integer 0-3, that's all
-      }), 4, 400)
-
-      // Server returned: { is_correct, points_earned, new_score, new_streak }
-      // Store result but DO NOT reveal correct answer in UI
+      const result = await withRetry(
+        () => submitAnswerSecure({ gameId, playerId: playerRef.current.id, questionIndex: qIndexRef.current, answer: optionIndex }),
+        4, 400
+      )
       scoreRef.current  = result.new_score
       streakRef.current = result.new_streak
       setTotalScore(result.new_score)
       setStreak(result.new_streak)
       setScoreResult(result)
-
       if (result.points_earned > 0) {
         setScoreFloat(true)
         setTimeout(() => setScoreFloat(false), 1200)
       }
     } catch (err) {
-      console.error('Submit failed after retries:', err)
       setSubmitError(true)
-      // Final fallback attempt after 3s
       setTimeout(async () => {
         try {
-          const result = await submitAnswerSecure({
-            gameId, playerId: playerRef.current.id,
-            questionIndex: qIndexRef.current, answer: optionIndex,
-          })
+          const result = await submitAnswerSecure({ gameId, playerId: playerRef.current.id, questionIndex: qIndexRef.current, answer: optionIndex })
           scoreRef.current  = result.new_score
           streakRef.current = result.new_streak
           setTotalScore(result.new_score)
@@ -296,8 +236,7 @@ export default function PlayerGame() {
 
   async function loadFinalResults() {
     const { data } = await supabase
-      .from('players').select('*')
-      .eq('game_id', gameId).order('score', { ascending: false })
+      .from('players').select('*').eq('game_id', gameId).order('score', { ascending: false })
     if (data) {
       setTopPlayers(data)
       const rank = data.findIndex(p => p.id === playerRef.current?.id) + 1
@@ -313,25 +252,13 @@ export default function PlayerGame() {
     ? (timeLeft / gameRef.current.time_per_question) * 100
     : 100
 
-  // ─── Render gates ─────────────────────────────────────────────────────────
-  if (phase === 'connecting') return <WaitingScreen text="Connecting..." />
-  if (!game || !player)       return <WaitingScreen text="Connecting..." />
-  if (phase === 'lobby')      return (
-    <>
-      <ConnectionGuard gameId={gameId} />
-      <WaitingScreen text="Waiting for host to start..." subtitle={game.title} pin={game.pin} nickname={player.nickname} />
-    </>
-  )
-  if (phase === 'finished')   return (
-    <FinishedScreen players={topPlayers} playerId={player.id} rank={finalRank}
-      score={totalScore} showConfetti={showConfetti} onHome={() => nav('/')} />
-  )
-
-  const showOptions = phase === 'question' || phase === 'locked' || phase === 'waiting'
+  if (phase === 'connecting') return <Waiting text="Connecting..." />
+  if (!game || !player)       return <Waiting text="Connecting..." />
+  if (phase === 'lobby')      return <Waiting text="Waiting for host to start..." subtitle={game.title} pin={game.pin} nickname={player.nickname} />
+  if (phase === 'finished')   return <FinishedScreen players={topPlayers} playerId={player.id} rank={finalRank} score={totalScore} showConfetti={showConfetti} onHome={() => nav('/')} />
 
   return (
     <div className="grain" style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column', position: 'relative', overflow: 'hidden' }}>
-      <ConnectionGuard gameId={gameId} />
       <div className="glow-orb" style={{ width: 300, height: 300, background: 'rgba(124,108,252,0.1)', top: -100, right: -80 }} />
 
       {/* Header */}
@@ -355,25 +282,20 @@ export default function PlayerGame() {
       {/* Timer bar */}
       {(phase === 'question' || phase === 'locked') && (
         <div style={{ height: 4, background: 'var(--surface2)' }}>
-          <div style={{
-            height: '100%', width: `${timePct}%`,
-            transition: 'width 1s linear, background 0.3s',
-            background: timePct > 50 ? 'var(--green)' : timePct > 20 ? 'var(--amber)' : 'var(--red)',
-          }} />
+          <div style={{ height: '100%', width: `${timePct}%`, transition: 'width 1s linear, background 0.3s', background: timePct > 50 ? 'var(--green)' : timePct > 20 ? 'var(--amber)' : 'var(--red)' }} />
         </div>
       )}
 
-      {/* Submit saving banner */}
+      {/* Saving banner — only when DB write is retrying */}
       {submitError && (
-        <div style={{ background: 'rgba(251,191,36,0.15)', borderBottom: '1px solid rgba(251,191,36,0.3)', padding: '8px 16px', fontSize: 13, color: 'var(--amber)', textAlign: 'center' }}>
-          ⟳ Saving your answer... (poor connection)
+        <div style={{ background: 'rgba(251,191,36,0.12)', borderBottom: '1px solid rgba(251,191,36,0.25)', padding: '7px 16px', fontSize: 12, color: 'var(--amber)', textAlign: 'center' }}>
+          Saving answer... (slow connection)
         </div>
       )}
 
-      {/* Main */}
+      {/* Main content */}
       <div style={{ flex: 1, padding: '1.5rem 1rem', display: 'flex', flexDirection: 'column', maxWidth: 600, margin: '0 auto', width: '100%', position: 'relative', zIndex: 1 }}>
 
-        {/* Question text */}
         {currentQ && (
           <div style={{ marginBottom: '1.25rem', animation: 'fadeUp 0.3s ease both' }}>
             <div style={{ fontSize: 12, color: 'var(--accent2)', fontWeight: 600, marginBottom: 8, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
@@ -385,54 +307,28 @@ export default function PlayerGame() {
           </div>
         )}
 
-        {/* Options */}
-        {currentQ && showOptions && (
+        {currentQ && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: '0.65rem', flex: 1 }}>
             {currentQ.options.map((opt, i) => {
               const isSelected = selectedOption === i
               const isLocked   = phase === 'locked' || phase === 'waiting'
-
-              // ANTI-CHEAT: we never color green/red based on correct answer here.
-              // The only visual feedback is: which button they pressed (accent color).
-              // No option ever turns green or red while waiting for host to advance.
-              let borderColor = 'var(--border2)'
-              let bgColor     = 'var(--surface)'
-              let textColor   = 'var(--text)'
-
-              if (isLocked && isSelected) {
-                // Show their choice in accent color — locked in
-                borderColor = OPTION_COLORS[i]
-                bgColor     = OPTION_BG[i]
-              } else if (!isLocked && isSelected) {
-                borderColor = OPTION_COLORS[i]
-                bgColor     = OPTION_BG[i]
-              } else if (isLocked && !isSelected) {
-                // Dim unselected options when locked
-                textColor = 'var(--text3)'
-                bgColor   = 'var(--surface)'
-              }
+              let borderColor  = 'var(--border2)', bgColor = 'var(--surface)', textColor = 'var(--text)'
+              if (isSelected) { borderColor = OPTION_COLORS[i]; bgColor = OPTION_BG[i] }
+              else if (isLocked) { textColor = 'var(--text3)' }
 
               return (
-                <button key={i}
-                  onClick={() => handleAnswer(i)}
-                  disabled={phase !== 'question'}
+                <button key={i} onClick={() => handleAnswer(i)} disabled={phase !== 'question'}
                   style={{
                     background: bgColor, border: `1.5px solid ${borderColor}`,
                     borderRadius: 'var(--radius)', padding: '1rem 1.25rem',
                     display: 'flex', alignItems: 'center', gap: 14,
                     cursor: phase === 'question' ? 'pointer' : 'default',
-                    transition: 'all 0.2s', textAlign: 'left', color: textColor,
-                    animation: 'pop 0.3s ease both', animationDelay: `${i * 0.06}s`,
-                    opacity: isLocked && !isSelected ? 0.5 : 1,
+                    transition: 'border-color 0.15s, background 0.15s',
+                    textAlign: 'left', color: textColor,
+                    opacity: isLocked && !isSelected ? 0.45 : 1,
+                    animation: 'pop 0.3s ease both', animationDelay: `${i * 0.05}s`,
                   }}>
-                  <span style={{
-                    width: 32, height: 32, borderRadius: 8, flexShrink: 0,
-                    fontFamily: 'var(--font-head)',
-                    background: isSelected ? OPTION_BG[i] : 'var(--surface3)',
-                    color: isSelected ? OPTION_COLORS[i] : 'var(--text3)',
-                    display: 'flex', alignItems: 'center', justifyContent: 'center',
-                    fontWeight: 700, fontSize: 13,
-                  }}>
+                  <span style={{ width: 32, height: 32, borderRadius: 8, flexShrink: 0, fontFamily: 'var(--font-head)', background: isSelected ? OPTION_BG[i] : 'var(--surface3)', color: isSelected ? OPTION_COLORS[i] : 'var(--text3)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 700, fontSize: 13 }}>
                     {OPTION_LABELS[i]}
                   </span>
                   <span style={{ fontSize: 15, fontWeight: 500 }}>{opt}</span>
@@ -442,48 +338,34 @@ export default function PlayerGame() {
           </div>
         )}
 
-        {/* Post-answer feedback — score only, no correct/wrong reveal */}
+        {/* Locked — answer saved, score shown, no correct/wrong */}
         {phase === 'locked' && (
-          <div style={{
-            marginTop: '1.5rem', padding: '1.1rem 1.25rem', borderRadius: 'var(--radius)',
-            background: 'var(--surface2)', border: '1px solid var(--border2)',
-            animation: 'pop 0.4s ease both',
-          }}>
+          <div style={{ marginTop: '1.5rem', padding: '1rem 1.25rem', borderRadius: 'var(--radius)', background: 'var(--surface2)', border: '1px solid var(--border2)', animation: 'pop 0.4s ease both' }}>
             {scoreResult ? (
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                 <div>
-                  <div style={{ fontWeight: 600, fontSize: 15, color: 'var(--text)' }}>Answer locked in ✓</div>
-                  <div style={{ fontSize: 12, color: 'var(--text3)', marginTop: 3 }}>
-                    Waiting for host to reveal...
-                  </div>
-                  {streak > 1 && (
-                    <div style={{ fontSize: 12, color: 'var(--amber)', marginTop: 3 }}>🔥 {streak} answer streak</div>
-                  )}
+                  <div style={{ fontWeight: 600, fontSize: 15 }}>Answer locked ✓</div>
+                  <div style={{ fontSize: 12, color: 'var(--text3)', marginTop: 3 }}>Waiting for next question</div>
+                  {streak > 1 && <div style={{ fontSize: 12, color: 'var(--amber)', marginTop: 3 }}>🔥 {streak} streak</div>}
                 </div>
                 <div style={{ textAlign: 'right' }}>
-                  <div style={{ fontFamily: 'var(--font-head)', fontWeight: 700, fontSize: 15, color: 'var(--text2)' }}>
-                    {totalScore.toLocaleString()} pts
-                  </div>
-                  <div style={{ fontSize: 11, color: 'var(--text3)' }}>total score</div>
+                  <div style={{ fontFamily: 'var(--font-head)', fontWeight: 700, fontSize: 16 }}>{totalScore.toLocaleString()}</div>
+                  <div style={{ fontSize: 11, color: 'var(--text3)' }}>total pts</div>
                 </div>
               </div>
             ) : (
               <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                <div style={{ width: 16, height: 16, borderRadius: '50%', border: '2px solid var(--border2)', borderTopColor: 'var(--accent)', animation: 'spin 0.8s linear infinite', flexShrink: 0 }} />
-                <span style={{ fontSize: 14, color: 'var(--text2)' }}>Saving your answer...</span>
+                <div style={{ width: 14, height: 14, borderRadius: '50%', border: '2px solid var(--border2)', borderTopColor: 'var(--accent)', animation: 'spin 0.8s linear infinite', flexShrink: 0 }} />
+                <span style={{ fontSize: 14, color: 'var(--text2)' }}>Saving...</span>
               </div>
             )}
           </div>
         )}
 
         {phase === 'waiting' && (
-          <div style={{
-            marginTop: '1.5rem', padding: '1rem 1.25rem', borderRadius: 'var(--radius)',
-            background: 'rgba(248,113,113,0.08)', border: '1px solid rgba(248,113,113,0.25)',
-            animation: 'pop 0.4s ease both', textAlign: 'center',
-          }}>
-            <div style={{ fontSize: 14, color: 'var(--red)', fontWeight: 500 }}>⏰ Time's up — no answer recorded</div>
-            <div style={{ fontSize: 12, color: 'var(--text3)', marginTop: 4 }}>Waiting for next question...</div>
+          <div style={{ marginTop: '1.5rem', padding: '1rem 1.25rem', borderRadius: 'var(--radius)', background: 'rgba(248,113,113,0.08)', border: '1px solid rgba(248,113,113,0.2)', animation: 'pop 0.4s ease both', textAlign: 'center' }}>
+            <div style={{ fontSize: 14, color: 'var(--red)', fontWeight: 500 }}>⏰ Time's up</div>
+            <div style={{ fontSize: 12, color: 'var(--text3)', marginTop: 3 }}>Waiting for next question</div>
           </div>
         )}
       </div>
@@ -491,9 +373,7 @@ export default function PlayerGame() {
   )
 }
 
-// ─── Sub-screens ──────────────────────────────────────────────────────────────
-
-function WaitingScreen({ text, subtitle, pin, nickname }) {
+function Waiting({ text, subtitle, pin, nickname }) {
   return (
     <div className="grain page" style={{ position: 'relative', overflow: 'hidden' }}>
       <div className="glow-orb" style={{ width: 400, height: 400, background: 'rgba(124,108,252,0.1)', top: -100, left: -100 }} />
@@ -514,10 +394,9 @@ function WaitingScreen({ text, subtitle, pin, nickname }) {
 }
 
 function FinishedScreen({ players, playerId, rank, score, showConfetti, onHome }) {
-  const sorted   = [...players].sort((a, b) => b.score - a.score)
-  const MEDALS   = ['🥇', '🥈', '🥉']
+  const sorted = [...players].sort((a, b) => b.score - a.score)
+  const MEDALS = ['🥇', '🥈', '🥉']
   const topEmoji = rank <= 3 ? MEDALS[rank - 1] : rank <= 10 ? '🏅' : '🏁'
-
   return (
     <div className="grain page" style={{ justifyContent: 'flex-start', paddingTop: '2rem', position: 'relative', overflow: 'hidden' }}>
       <Confetti active={showConfetti} />
@@ -527,36 +406,22 @@ function FinishedScreen({ players, playerId, rank, score, showConfetti, onHome }
           <div style={{ fontSize: 48, marginBottom: 8, animation: 'pop 0.6s ease both' }}>{topEmoji}</div>
           <h2 style={{ fontFamily: 'var(--font-head)', fontWeight: 800, fontSize: 28, marginBottom: 6 }}>Game Over!</h2>
           <div style={{ color: 'var(--text2)', fontSize: 15 }}>
-            You finished{' '}
-            <strong style={{ color: 'var(--accent2)', fontFamily: 'var(--font-head)', fontSize: 18 }}>#{rank}</strong>{' '}
+            You finished <strong style={{ color: 'var(--accent2)', fontFamily: 'var(--font-head)', fontSize: 18 }}>#{rank}</strong>{' '}
             with <strong style={{ color: 'var(--text)' }}>{score.toLocaleString()} pts</strong>
           </div>
           {rank <= 3 && <div style={{ color: 'var(--gold)', fontSize: 13, marginTop: 6 }}>🎉 Top 3 finish!</div>}
         </div>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: '2rem' }}>
           {sorted.slice(0, 8).map((p, i) => (
-            <div key={p.id} className="card" style={{
-              padding: '0.85rem 1.25rem', display: 'flex', alignItems: 'center', gap: 12,
-              border: p.id === playerId ? '1px solid var(--accent)' : '1px solid var(--border)',
-              background: p.id === playerId ? 'rgba(124,108,252,0.08)' : 'var(--surface)',
-              animation: 'slideIn 0.4s ease both', animationDelay: `${i * 0.05}s`,
-            }}>
-              <span style={{ fontFamily: 'var(--font-head)', fontWeight: 700, minWidth: 28, textAlign: 'center' }}>
-                {i < 3 ? MEDALS[i] : `#${i + 1}`}
-              </span>
+            <div key={p.id} className="card" style={{ padding: '0.85rem 1.25rem', display: 'flex', alignItems: 'center', gap: 12, border: p.id === playerId ? '1px solid var(--accent)' : '1px solid var(--border)', background: p.id === playerId ? 'rgba(124,108,252,0.08)' : 'var(--surface)', animation: 'slideIn 0.4s ease both', animationDelay: `${i * 0.05}s` }}>
+              <span style={{ fontFamily: 'var(--font-head)', fontWeight: 700, minWidth: 28, textAlign: 'center' }}>{i < 3 ? MEDALS[i] : `#${i + 1}`}</span>
               <span style={{ flex: 1, fontWeight: p.id === playerId ? 600 : 400 }}>{p.nickname}</span>
               <span style={{ fontFamily: 'var(--font-head)', fontWeight: 700 }}>{p.score.toLocaleString()}</span>
             </div>
           ))}
-          {sorted.length > 8 && (
-            <div style={{ textAlign: 'center', fontSize: 13, color: 'var(--text3)' }}>
-              +{sorted.length - 8} more players
-            </div>
-          )}
+          {sorted.length > 8 && <div style={{ textAlign: 'center', fontSize: 13, color: 'var(--text3)' }}>+{sorted.length - 8} more players</div>}
         </div>
-        <button className="btn btn-primary" style={{ width: '100%', padding: '13px' }} onClick={onHome}>
-          Back to Home
-        </button>
+        <button className="btn btn-primary" style={{ width: '100%', padding: '13px' }} onClick={onHome}>Back to Home</button>
       </div>
     </div>
   )
